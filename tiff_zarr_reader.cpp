@@ -57,32 +57,75 @@ std::unique_ptr<std::vector<T>> downsample_average(std::vector<T>& source_array,
   int new_col = static_cast<int>(ceil(col / 2.0));
   auto result_data = std::make_unique<std::vector<T>>(new_row * new_col);
   auto data_ptr = result_data->data();
-  for (int i = 0; i < row; i++) {
-    for (int j = 0; j < col; ++j) {
-      int new_data_index = static_cast<int>(floor(i / 2.0)) * new_col +
-                           static_cast<int>(floor(j / 2.0));
-      data_ptr[new_data_index] =
-          data_ptr[new_data_index] + 0.25 * source_array[i * col + j];
+
+  int even_row{0}, even_col{0};
+  
+  if (row%2==0){
+    even_row = row;
+  }
+  else {
+    even_row = row-1;
+  }
+
+  if (col%2==0){
+    even_col = col;
+  }
+  else {
+    even_col = col-1;
+  }
+
+  for (int i = 0; i < even_row; i=i+2) {
+    int row_offset = (i / 2) * new_col;
+    int prev_row_offset = i * col;
+    int prev_row_offset_2 = (i+1) * col;
+    for (int j = 0; j < even_col; j = j + 2) {
+      int new_data_index = row_offset + (j / 2);
+      data_ptr[new_data_index] =   (source_array[prev_row_offset + j] 
+                                   + source_array[prev_row_offset + j + 1]
+                                   + source_array[prev_row_offset_2 + j]
+                                   + source_array[prev_row_offset_2 + j + 1])*0.25;
     }
   }
   // fix the last col if odd
-  if (col%2 == 1){
-    for(int j=0; j<new_col; ++j){
-      data_ptr[(new_row-1)*new_col+j] *=2;
+  if (col % 2 == 1) {
+    for (int i = 0; i < even_row; i=i+2) {
+      data_ptr[((i / 2)+1) * new_col-1] = 0.5*(source_array[(i+1)*col-1] + source_array[(i+2)*col-1]);
     }
   }
 
   // fix the last row if odd
-  if (row%2 == 1){
-    for(int i=0; i<new_row; ++i){
-      data_ptr[i*new_col+(new_col-1)] *=2;
+  if (row % 2 == 1) {
+    int col_offset = (new_row-1)*new_col;
+    int old_col_offset =(row-1)*col;
+    for (int i = 0; i < even_col; i=i+2) {
+      data_ptr[col_offset+(i/2)] = 0.5*(source_array[old_col_offset+i] + source_array[old_col_offset+i+1]);
     }
   }
-  return std::move(result_data);
+  
+  // fix the last element if both row and col are odd
+  if (row%2==1 && col%2==1){
+      data_ptr[new_row*new_col-1] = source_array[row*col-1];
+  }
+
+  return result_data;
 }
 
 template <typename T>
-double DownsampleAndWrtieChunk(T&& source, T&& dest, int x1, int x2, int y1, int y2){
+double DownsampleAndWrtieChunk(T&& source, T&& dest, int x1, int x2, int y1, int y2, int x1_old, int x2_old, int y1_old, int y2_old){
+  std::vector<uint16_t> read_buffer((x2_old-x1_old)*(y2_old-y1_old));
+  auto array = tensorstore::Array(read_buffer.data(), {x2_old-x1_old, y2_old-y1_old}, tensorstore::c_order);
+
+  tensorstore::Read(source | 
+          tensorstore::Dims(0).ClosedInterval(x1_old,x2_old-1) |
+          tensorstore::Dims(1).ClosedInterval(y1_old,y2_old-1) ,
+          tensorstore::UnownedToShared(array)).value();
+
+  auto resutl = downsample_average(read_buffer, (x2_old-x1_old), (y2_old-y1_old));
+  auto result_array = tensorstore::Array(resutl->data(), {x2-x1, y2-y1}, tensorstore::c_order);
+  tensorstore::Write(tensorstore::UnownedToShared(result_array), dest |
+      tensorstore::Dims(0).ClosedInterval(x1,x2-1) |
+      tensorstore::Dims(1).ClosedInterval(y1,y2-1)).value();     
+  // wait for write
   return 0.0;
 }
 
@@ -244,7 +287,7 @@ void write_downsampled_image(std::string& input_file, std::string& output_file){
                             {"cache_pool", {{"total_bytes_limit", 1000000000}}},
                             {"data_copy_concurrency", {{"limit", 4}}},
                             {"file_io_concurrency", {{"limit", 4}}},
-                          }},
+                          }}},
                           //context,
                           tensorstore::OpenMode::open,
                           tensorstore::ReadWriteMode::read).result());
@@ -428,7 +471,12 @@ void read_ometiff_data()
   //sleep(60);
 }
 
-
+void test_write_downsampled_image()
+{
+  std::string input_file = "/mnt/hdd8/axle/data/bfio_test_images/r001_c001_z000_zarr_2/16/";
+  std::string output_file = "/mnt/hdd8/axle/data/bfio_test_images/r001_c001_z000_zarr_2/160/";
+  write_downsampled_image(input_file, output_file);
+}
 
 void test_write_base_scale()
 {
@@ -440,8 +488,8 @@ void test_write_base_scale()
 int main(int argc, char** argv) {
   auto time1 = std::chrono::steady_clock::now();
   //read_ometiff_data();
-  
-  test_write_base_scale();
+  //test_write_base_scale();
+  test_write_downsampled_image();
   auto time2 = std::chrono::steady_clock::now();
   std::chrono::duration<double> elapsed_seconds =  time2-time1;
   std::cout<< "time taken " << elapsed_seconds.count()<<std::endl;
